@@ -1,25 +1,34 @@
-from fastapi import FastAPI, UploadFile, File, HTTPException, Query
+from fastapi import FastAPI, UploadFile, File, HTTPException, Header, Form, Request
 from fastapi.responses import Response
-import httpx
+import httpx, hashlib, os
 from rembg import remove
-import hashlib
 
-app = FastAPI(title="wair-cleaner", version="1.0.0")
+app = FastAPI()
+TOKEN = os.getenv("CLEANER_TOKEN", "")
 
 @app.get("/healthz")
-async def healthz():
+def healthz():
     return {"ok": True}
 
-@app.api_route("/clean", methods=["GET","POST"])
+# Accept both GET (query) and POST (form or multipart)
+@app.api_route("/clean", methods=["GET", "POST"])
 async def clean(
-    file: UploadFile | None = File(default=None),
-    image_url: str | None = Query(default=None, description="URL to an image")
+    request: Request,
+    image_url: str | None = Form(default=None),      # binds x-www-form-urlencoded
+    file: UploadFile | None = File(default=None),    # binds multipart file
+    x_cleaner_token: str | None = Header(default=None),
 ):
-    if not file and not image_url:
-        raise HTTPException(status_code=400, detail="Provide either a file or image_url")
-    if file and image_url:
-        raise HTTPException(status_code=400, detail="Provide only one of file or image_url")
+    if TOKEN and x_cleaner_token != TOKEN:
+        raise HTTPException(status_code=401, detail="unauthorized")
 
+    # If not provided as form, allow query param (GET /clean?image_url=...)
+    if not image_url:
+        image_url = request.query_params.get("image_url")
+
+    if not image_url and file is None:
+        raise HTTPException(status_code=400, detail="provide image_url or file")
+
+    # Fetch bytes (from URL or uploaded file)
     if image_url:
         async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
             r = await client.get(image_url)
@@ -28,8 +37,10 @@ async def clean(
     else:
         raw = await file.read()
 
+    # Run rembg (returns PNG bytes with alpha)
     out = remove(raw)
 
+    # Cache hints
     etag = hashlib.sha256(raw).hexdigest()
     headers = {"ETag": etag, "Cache-Control": "public, max-age=31536000, immutable"}
 
