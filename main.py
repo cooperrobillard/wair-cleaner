@@ -6,16 +6,20 @@ from fastapi import FastAPI, File, UploadFile, HTTPException, Request, Query
 from fastapi.responses import Response
 import httpx
 from PIL import Image
-from rembg.bg import remove
+from rembg import remove, new_session  # <-- use new_session to control model
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("wair-cleaner")
+
+# Use tiny model by default to fit Render Free 512Mi RAM
+MODEL_NAME = os.environ.get("REMBG_MODEL", "u2netp")
+SESSION = new_session(MODEL_NAME)
 
 app = FastAPI()
 
 @app.get("/")
 def root():
-    return {"ok": True, "service": "wair-cleaner"}
+    return {"ok": True, "service": "wair-cleaner", "model": MODEL_NAME}
 
 @app.get("/healthz")
 def health():
@@ -23,11 +27,12 @@ def health():
 
 @app.on_event("startup")
 async def warm():
+    # Warm the chosen model once on startup
     try:
         buf = BytesIO()
         Image.new("RGB", (1, 1), (255, 255, 255)).save(buf, "PNG")
-        remove(buf.getvalue())
-        log.info("Model warmed")
+        remove(buf.getvalue(), session=SESSION)
+        log.info("Model '%s' warmed", MODEL_NAME)
     except Exception:
         log.exception("Warmup failed")
 
@@ -44,6 +49,7 @@ async def clean(
     if not image_url and file is None:
         raise HTTPException(status_code=400, detail="provide image_url or file")
 
+    # Fetch source bytes
     try:
         if image_url:
             headers = {
@@ -66,8 +72,9 @@ async def clean(
         log.exception("fetch error")
         raise HTTPException(status_code=400, detail="failed to fetch source image")
 
+    # Remove background using the shared session
     try:
-        out = remove(raw)
+        out = remove(raw, session=SESSION)
     except Exception:
         log.exception("remove() failed")
         raise HTTPException(status_code=502, detail="clean failed")
