@@ -1,3 +1,4 @@
+import base64
 import os, hashlib, logging
 from io import BytesIO
 from typing import Optional
@@ -48,27 +49,39 @@ def _ensure_png_bytes(raw: bytes) -> bytes:
             im.save(buf, format="PNG")
             return buf.getvalue()
     except UnidentifiedImageError:
-        raise HTTPException(status_code=400, detail="unsupported or corrupt image")
+        raise HTTPException(status_code=400, detail={"error": "unsupported or corrupt image"})
     except Exception:
         log.exception("Pillow decode/encode failed")
-        raise HTTPException(status_code=400, detail="failed to parse image")
+        raise HTTPException(status_code=400, detail={"error": "failed to parse image"})
 
 @app.api_route("/clean", methods=["GET", "POST"])
 async def clean(
     request: Request,
     image_url: Optional[str] = Query(default=None),
     file: Optional[UploadFile] = File(default=None),
+    return_mode: Optional[str] = Query(default=None, alias="return"),
 ):
     token = request.headers.get("x-cleaner-token") or request.headers.get("X-Cleaner-Token")
     if not token or token != os.environ.get("CLEANER_TOKEN"):
-        raise HTTPException(status_code=401, detail="invalid token")
+        log.warning("clean: invalid token supplied")
+        raise HTTPException(status_code=401, detail={"error": "invalid token"})
 
     if not image_url and file is None:
-        raise HTTPException(status_code=400, detail="provide image_url or file")
+        log.warning("clean: missing input (no image_url or file)")
+        raise HTTPException(status_code=400, detail={"error": "provide image_url or file"})
 
     # Fetch source bytes
     try:
-        if image_url:
+        if file is not None:
+            if file.content_type and not file.content_type.startswith("image/"):
+                log.warning("clean: upload with non-image content-type %s", file.content_type)
+                raise HTTPException(status_code=400, detail={"error": "upload must be an image"})
+            raw = await file.read()
+            if not raw:
+                log.warning("clean: empty upload from %s", file.filename)
+                raise HTTPException(status_code=400, detail={"error": "empty upload"})
+            source = "upload"
+        elif image_url:
             headers = {
                 "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome Safari",
                 "Accept": "image/*,*/*",
@@ -77,19 +90,23 @@ async def clean(
             async with httpx.AsyncClient(timeout=30.0, follow_redirects=True, headers=headers) as client:
                 r = await client.get(image_url)
                 if r.status_code >= 400:
-                    raise HTTPException(status_code=400, detail=f"fetch failed: {r.status_code}")
+                    log.warning("clean: fetch failed for %s with %s", image_url, r.status_code)
+                    raise HTTPException(status_code=400, detail={"error": "fetch failed", "status_code": r.status_code})
                 raw = r.content
-        else:
-            if file.content_type and not file.content_type.startswith("image/"):
-                raise HTTPException(status_code=400, detail="upload must be an image")
-            raw = await file.read()
             if not raw:
-                raise HTTPException(status_code=400, detail="empty upload")
+                log.warning("clean: fetched URL had no body %s", image_url)
+                raise HTTPException(status_code=400, detail={"error": "empty download"})
+            source = "url"
+        else:
+            log.warning("clean: neither file nor image_url provided after validation")
+            raise HTTPException(status_code=400, detail={"error": "provide image_url or file"})
     except HTTPException:
         raise
     except Exception:
         log.exception("fetch error")
-        raise HTTPException(status_code=400, detail="failed to fetch source image")
+        raise HTTPException(status_code=400, detail={"error": "failed to fetch source image"})
+
+    log.info("clean: source=%s bytes=%d", source, len(raw))
 
     # Pre-validate & normalize input to a manageable PNG
     src_png = _ensure_png_bytes(raw)
@@ -99,12 +116,21 @@ async def clean(
         out = remove(src_png, session=SESSION)
     except Exception as e:
         log.exception("remove() failed")
+        error_detail = {
+            "error": "clean failed",
+            "exception": str(e),
+            "exception_type": e.__class__.__name__,
+        }
         if DEBUG:
-            return JSONResponse(status_code=502, content={"error": "clean failed", "exception": str(e)})
-        raise HTTPException(status_code=502, detail="clean failed")
+            return JSONResponse(status_code=502, content=error_detail)
+        raise HTTPException(status_code=502, detail=error_detail)
 
     etag = hashlib.sha256(src_png).hexdigest()
     headers = {"ETag": etag, "Cache-Control": "public, max-age=31536000, immutable"}
+    if return_mode == "json":
+        encoded = base64.b64encode(out).decode("ascii")
+        log.info("clean: returning json payload for source=%s", source)
+        return {"ok": True, "source": source, "etag": etag, "png_b64": encoded}
     return Response(content=out, media_type="image/png", headers=headers)
 
 # Optional tiny self-test route (does not require token)
@@ -135,3 +161,15 @@ def diag():
     except Exception as e:
         log.exception("diag failed")
         return JSONResponse(status_code=500, content={"error": str(e)})
+
+
+@app.post("/debug-echo")
+async def debug_echo(request: Request, file: UploadFile = File(...)):
+    token = request.headers.get("x-cleaner-token") or request.headers.get("X-Cleaner-Token")
+    if not token or token != os.environ.get("CLEANER_TOKEN"):
+        log.warning("debug-echo: invalid token supplied")
+        raise HTTPException(status_code=401, detail={"error": "invalid token"})
+    raw = await file.read()
+    size = len(raw)
+    log.info("debug-echo: filename=%s content_type=%s size=%d", file.filename, file.content_type, size)
+    return {"filename": file.filename, "content_type": file.content_type, "size": size}
