@@ -117,3 +117,19 @@ def selftest():
     except Exception as e:
         log.exception("selftest failed")
         return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
+
+
+@app.get("/diag")
+def diag():
+    try:
+        import onnxruntime as ort
+        info = {
+            "onnxruntime_version": getattr(ort, "__version__", "unknown"),
+            "available_providers": ort.get_available_providers(),
+            "device": getattr(ort, "get_device", lambda: "unknown")(),
+            "model": MODEL_NAME,
+        }
+        return info
+    except Exception as e:
+        log.exception("diag failed")
+        return JSONResponse(status_code=500, content={"error": str(e)})

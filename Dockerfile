@@ -4,7 +4,11 @@ FROM python:3.11-slim
 # System deps for pillow/onnxruntime
 RUN apt-get update && apt-get install -y --no-install-recommends \
     libjpeg62-turbo-dev zlib1g-dev libpng-dev ca-certificates \
+    libgomp1 libstdc++6 libatomic1 \
   && rm -rf /var/lib/apt/lists/*
+
+ENV OMP_NUM_THREADS=1
+ENV MKL_THREADING_LAYER=GNU
 
 # Python deps
 WORKDIR /app
