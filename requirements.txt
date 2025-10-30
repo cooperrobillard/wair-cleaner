@@ -1,8 +1,10 @@
-numpy==1.26.4
 fastapi==0.115.0
 uvicorn==0.30.6
+rembg==2.0.59
 httpx==0.27.2
 pillow==10.4.0
 python-multipart==0.0.9
-onnxruntime==1.16.3
-rembg==2.0.59
+# Pin NumPy <2 to avoid ABI break with many wheels (incl. onnxruntime on some hosts)
+numpy==1.26.4
+# (Optional) pin onnxruntime CPU to a widely-compatible build; rembg will use this.
+onnxruntime==1.18.1

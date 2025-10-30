@@ -80,6 +80,8 @@ async def clean(
                     raise HTTPException(status_code=400, detail=f"fetch failed: {r.status_code}")
                 raw = r.content
         else:
+            if file.content_type and not file.content_type.startswith("image/"):
+                raise HTTPException(status_code=400, detail="upload must be an image")
             raw = await file.read()
             if not raw:
                 raise HTTPException(status_code=400, detail="empty upload")
