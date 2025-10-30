@@ -25,17 +25,6 @@ def root():
 def health():
     return {"ok": True}
 
-@app.on_event("startup")
-async def warm():
-    # Warm the chosen model once on startup
-    try:
-        buf = BytesIO()
-        Image.new("RGB", (1, 1), (255, 255, 255)).save(buf, "PNG")
-        remove(buf.getvalue(), session=SESSION)
-        log.info("Model '%s' warmed", MODEL_NAME)
-    except Exception:
-        log.exception("Warmup failed")
-
 @app.api_route("/clean", methods=["GET", "POST"])
 async def clean(
     request: Request,
