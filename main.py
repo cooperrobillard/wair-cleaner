@@ -3,16 +3,20 @@ from io import BytesIO
 from typing import Optional
 
 from fastapi import FastAPI, File, UploadFile, HTTPException, Request, Query
-from fastapi.responses import Response
+from fastapi.responses import Response, JSONResponse
 import httpx
-from PIL import Image
-from rembg import remove, new_session  # <-- use new_session to control model
+from PIL import Image, UnidentifiedImageError
+from rembg import remove, new_session
 
 logging.basicConfig(level=logging.INFO)
 log = logging.getLogger("wair-cleaner")
 
-# Use tiny model by default to fit Render Free 512Mi RAM
-MODEL_NAME = os.environ.get("REMBG_MODEL", "u2netp")
+# Config
+MODEL_NAME = os.environ.get("REMBG_MODEL", "u2netp")  # keep memory low
+MAX_SIDE = int(os.environ.get("MAX_SIDE", "2048"))    # downscale huge inputs
+DEBUG = os.environ.get("DEBUG", "0") == "1"
+
+# Load model once
 SESSION = new_session(MODEL_NAME)
 
 app = FastAPI()
@@ -24,6 +28,30 @@ def root():
 @app.get("/healthz")
 def health():
     return {"ok": True}
+
+def _downscale_if_needed(img: Image.Image) -> Image.Image:
+    w, h = img.size
+    m = max(w, h)
+    if m <= MAX_SIDE:
+        return img
+    scale = MAX_SIDE / float(m)
+    new_size = (max(1, int(w*scale)), max(1, int(h*scale)))
+    return img.resize(new_size, Image.LANCZOS)
+
+def _ensure_png_bytes(raw: bytes) -> bytes:
+    # Decode with Pillow (catches non-images), optionally downscale, re-encode PNG
+    try:
+        with Image.open(BytesIO(raw)) as im:
+            im.load()  # force decode
+            im = _downscale_if_needed(im.convert("RGBA"))
+            buf = BytesIO()
+            im.save(buf, format="PNG")
+            return buf.getvalue()
+    except UnidentifiedImageError:
+        raise HTTPException(status_code=400, detail="unsupported or corrupt image")
+    except Exception:
+        log.exception("Pillow decode/encode failed")
+        raise HTTPException(status_code=400, detail="failed to parse image")
 
 @app.api_route("/clean", methods=["GET", "POST"])
 async def clean(
@@ -61,13 +89,31 @@ async def clean(
         log.exception("fetch error")
         raise HTTPException(status_code=400, detail="failed to fetch source image")
 
-    # Remove background using the shared session
+    # Pre-validate & normalize input to a manageable PNG
+    src_png = _ensure_png_bytes(raw)
+
+    # Background removal
     try:
-        out = remove(raw, session=SESSION)
-    except Exception:
+        out = remove(src_png, session=SESSION)
+    except Exception as e:
         log.exception("remove() failed")
+        if DEBUG:
+            return JSONResponse(status_code=502, content={"error": "clean failed", "exception": str(e)})
         raise HTTPException(status_code=502, detail="clean failed")
 
-    etag = hashlib.sha256(raw).hexdigest()
+    etag = hashlib.sha256(src_png).hexdigest()
     headers = {"ETag": etag, "Cache-Control": "public, max-age=31536000, immutable"}
     return Response(content=out, media_type="image/png", headers=headers)
+
+# Optional tiny self-test route (does not require token)
+@app.get("/selftest")
+def selftest():
+    # 1x1 white
+    buf = BytesIO()
+    Image.new("RGBA", (1, 1), (255, 255, 255, 255)).save(buf, "PNG")
+    try:
+        _ = remove(buf.getvalue(), session=SESSION)
+        return {"ok": True, "model": MODEL_NAME}
+    except Exception as e:
+        log.exception("selftest failed")
+        return JSONResponse(status_code=500, content={"ok": False, "error": str(e)})
